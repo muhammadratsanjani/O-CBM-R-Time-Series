@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+fi2010_data/
+*.npy
+*.pt
+*.pth
+*.log
+.ipynb_checkpoints/
+*.aux
+*.out
+*.pdf
+*.bbl
+*.blg
