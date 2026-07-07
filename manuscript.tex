@@ -177,6 +177,15 @@ We conduct an ablation study comparing three model variants:
     \item \textbf{O-CBM+R (Ours)}: Our proposed architecture incorporating the 104 concepts alongside a 32-dimensional residual pathway, constrained by the orthogonality penalty ($\beta = 5.0$).
 \end{enumerate}
 
+\subsection{Implementation and Optimization Details}
+Training deep CBMs on 4.5 million high-frequency LOB events introduces severe computational and stability bottlenecks. To achieve the results in this study, we implemented four critical optimizations:
+\begin{enumerate}
+    \item \textbf{Zero-RAM Memory Mapping:} Standard data loaders (e.g., Pandas) suffer from catastrophic out-of-memory (OOM) failures when parsing the highly transposed FI-2010 text files (149 rows, $>400,000$ columns per day). We developed a custom pipeline that parses the data row-by-row into binary caches and streams it via OS-level memory mapping (\texttt{mmap}), completely bypassing Python RAM limitations.
+    \item \textbf{Geometric Stabilization:} We applied 1D Batch Normalization (\texttt{BatchNorm1d}) independently to both the concept extractor and the residual extractor. This prevents internal covariate shift and ensures the latent features are on the same geometric scale, which is strictly required for the cosine similarity orthogonality penalty to function correctly.
+    \item \textbf{Gradient and Learning Rate Schedules:} To prevent exploding gradients characteristic of recurrent networks on volatile financial data, we employed Gradient Clipping (max norm $1.0$) alongside a Cosine Annealing Learning Rate scheduler for smooth convergence.
+    \item \textbf{Orthogonality Annealing:} We utilized a linear annealing schedule for the penalty coefficient $\beta$, gradually increasing it from 0 to 5.0 over the first few epochs. This allows the residual pathway to freely discover predictive features initially before geometrically forcing it into the orthogonal complement of the human concepts.
+\end{enumerate}
+
 \subsection{Results and Discussion}
 
 \begin{table}[h]
