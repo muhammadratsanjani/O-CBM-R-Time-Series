@@ -95,24 +95,62 @@ In this work, we propose O-CBM+R to address these limitations. Specifically, we 
     \draw [thick, <->, >=stealth, dashed, red] (C) -- node[above, font=\footnotesize] {Orthogonality Penalty} (R);
     
     \end{tikzpicture}
-    \caption{The proposed O-CBM+R Architecture. The raw LOB input is processed by a temporal feature extractor into a latent state. This state branches into the supervised Concept Bottleneck ($\hat{C}$) and the unrestricted Residual Pathway ($R$). An Orthogonal Penalty actively repels $R$ from $\hat{C}$ during optimization.}
+    \caption{The proposed O-CBM+R Architecture. The raw LOB input is processed by a shared LSTM encoder into a latent state $Z$. This state branches into the supervised Concept Pathway ($\hat{C}$) and the unsupervised Residual Pathway ($R$) via independent linear heads with BatchNorm. The Orthogonal Penalty actively repels the column spaces of $R$ and $\hat{C}$ during optimization, preventing concept leakage.}
     \label{fig:architecture}
 \end{figure}
 
-\subsection{The Orthogonal Residual Concept Bottleneck (O-CBM+R)}
-Let $\mathcal{X} \in \mathbb{R}^{B \times T \times 40}$ denote the raw LOB input space, and $\mathcal{C} \in \mathbb{R}^{B \times 104}$ denote the human-defined financial concepts (e.g., price derivatives, accumulated volume differences). As illustrated in Figure \ref{fig:architecture}, our framework processes the raw input $\mathcal{X}$ through a temporal feature extractor (e.g., LSTM or Transformer) before splitting into dual pathways.
+\subsection{Formal Problem Setup}
 
-Our architecture splits the latent representation into two strictly orthogonal subspaces: $\hat{C}$ (supervised human concepts) and $R$ (unsupervised residual discovery).
+Let $\mathcal{X} \in \mathbb{R}^{B \times T \times d_x}$ denote a batch of raw LOB inputs, where $B$ is the batch size, $T = 100$ is the sequence length (tick window), and $d_x = 40$ is the number of raw order book features. Let $C \in \mathbb{R}^{B \times k}$ denote the ground-truth human-defined financial concepts with $k = 104$, and $Y \in \{0, 1, 2\}^B$ denote the mid-price movement labels (upward, stationary, downward). The goal is to learn a predictor $h: \mathcal{X} \rightarrow Y$ that is simultaneously: (i) \textit{accurate}, matching or approaching unconstrained ERM performance, (ii) \textit{interpretable}, routing predictions through human-defined concepts $C$, and (iii) \textit{causally grounded}, ensuring any additional predictive power comes exclusively from genuinely novel latent factors, not from concept leakage.
 
-The loss function is defined as:
+\subsection{Dual-Pathway Architecture}
+
+As illustrated in Figure~\ref{fig:architecture}, O-CBM+R processes each input sequence $\mathcal{X}$ through a \textbf{shared temporal encoder} $f_\theta: \mathbb{R}^{T \times d_x} \rightarrow \mathbb{R}^{d_h}$, implemented as a two-layer LSTM with hidden dimension $d_h = 128$. The final hidden state $Z = f_\theta(\mathcal{X}) \in \mathbb{R}^{B \times d_h}$ is then passed in parallel to two independent linear projection heads:
+
+\begin{itemize}
+    \item \textbf{Concept Pathway:} $f_c: \mathbb{R}^{d_h} \rightarrow \mathbb{R}^{k}$, defined as $\hat{C} = \text{BN}_c(W_c Z^\top + b_c)$, where $W_c \in \mathbb{R}^{k \times d_h}$ and $\text{BN}_c$ denotes Batch Normalization applied column-wise. This pathway is supervised by the ground-truth concepts $C$.
+    \item \textbf{Residual Pathway:} $f_r: \mathbb{R}^{d_h} \rightarrow \mathbb{R}^{m}$, defined as $R = \text{BN}_r(W_r Z^\top + b_r)$, where $W_r \in \mathbb{R}^{m \times d_h}$ with $m = 32$. This pathway is unsupervised and dedicated to discovering unmapped latent market micro-structures.
+\end{itemize}
+
+The two representations are concatenated to form the hybrid bottleneck $V = [\hat{C} \oplus R] \in \mathbb{R}^{B \times (k+m)}$, which is passed to a final linear predictor $\phi: \mathbb{R}^{k+m} \rightarrow \mathbb{R}^{3}$ to produce the class logits $\hat{Y} = \phi(V)$. The shared BatchNorm ensures $\hat{C}$ and $R$ operate on the same geometric scale---a necessary condition for the orthogonality penalty to be well-defined across both subspaces.
+
+\subsection{Orthogonality Penalty}
+
+The core technical contribution is the \textbf{Cross-Subspace Orthogonality Penalty}, which enforces geometric separation between the concept and residual subspaces at the population level. Let $\tilde{C} = \text{normalize}(\hat{C}, \text{dim}=0) \in \mathbb{R}^{B \times k}$ and $\tilde{R} = \text{normalize}(R, \text{dim}=0) \in \mathbb{R}^{B \times m}$ denote the column-normalized (feature-wise) representations. The penalty is defined as:
+
 \begin{equation}
-    \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{task}}(Y, \hat{Y}) + \alpha \mathcal{L}_{\text{concept}}(C, \hat{C}) + \beta \mathcal{L}_{\text{ortho}}(\hat{C}, R)
+    \mathcal{L}_{\text{ortho}}(\hat{C}, R) = \left\| \tilde{C}^\top \tilde{R} \right\|_F
+    \label{eq:ortho}
 \end{equation}
 
-where the orthogonality penalty $\mathcal{L}_{\text{ortho}}$ is computed over the normalized vectors to ensure the geometric separation of the hypothesis spaces:
+where $\|\cdot\|_F$ is the Frobenius norm. The matrix $\tilde{C}^\top \tilde{R} \in \mathbb{R}^{k \times m}$ is the \textit{full cross-correlation matrix} between concept and residual features across the batch; its $(j, l)$-th entry measures the normalized co-activation between the $j$-th concept neuron and the $l$-th residual neuron. Minimizing $\mathcal{L}_{\text{ortho}}$ to zero forces \textit{all} $k \times m$ pairwise concept-residual correlations to vanish simultaneously---strictly stronger than any scalar cosine similarity penalty.
+
+\begin{proposition}[Equivalence to Matrix Orthogonality Constraint]
+\label{prop:equivalence}
+$\mathcal{L}_{\text{ortho}}(\hat{C}, R) = 0$ if and only if $\tilde{C}^\top \tilde{R} = 0_{k \times m}$, which implies the empirical cross-covariance $\hat{C}^\top R = 0_{k \times m}$. In expectation over the data distribution, this condition converges to the population constraint $\mathbb{E}[C R^\top] = 0_{k \times m}$ assumed in Theorem~\ref{thm:identifiability}.
+\end{proposition}
+
+\begin{proof}
+Since $\|\cdot\|_F \geq 0$ and $\|\cdot\|_F = 0 \Leftrightarrow \cdot = 0$, the first equivalence is immediate from the definition of the Frobenius norm. Column normalization is an invertible diagonal scaling; thus $\tilde{C}^\top \tilde{R} = 0_{k\times m} \Leftrightarrow \hat{C}^\top R = 0_{k \times m}$. By the Law of Large Numbers, as $B \to \infty$, $\frac{1}{B}\hat{C}^\top R \xrightarrow{p} \mathbb{E}[\hat{C} R^\top]$. Under Theorem~\ref{thm:identifiability_imperfect}, as training converges ($\epsilon \to 0$), $\mathbb{E}[\hat{C} R^\top] \to \mathbb{E}[C R^\top]$, completing the chain.
+\end{proof}
+
+\subsection{Training Objective}
+
+The total training objective combines three terms:
+
 \begin{equation}
-    \mathcal{L}_{\text{ortho}} = \sum \left| \frac{\hat{C} \cdot R}{||\hat{C}||_2 \cdot ||R||_2} \right|
+    \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{task}}(Y, \hat{Y}) + \alpha\, \mathcal{L}_{\text{concept}}(C, \hat{C}) + \beta(t)\cdot \mathcal{L}_{\text{ortho}}(\hat{C}, R)
+    \label{eq:loss}
 \end{equation}
+
+where each component is formally defined as:
+\begin{itemize}
+    \item $\mathcal{L}_{\text{task}}(Y, \hat{Y}) = -\frac{1}{B}\sum_{i=1}^{B} \log \hat{Y}_{i, Y_i}$: cross-entropy loss for 3-class mid-price movement prediction.
+    \item $\mathcal{L}_{\text{concept}}(C, \hat{C}) = \frac{1}{Bk}\sum_{i=1}^{B}\|\hat{C}_i - C_i\|_2^2$: mean squared error supervising the concept pathway against ground-truth financial indicators.
+    \item $\mathcal{L}_{\text{ortho}}(\hat{C}, R)$: the cross-subspace orthogonality penalty from Eq.~\eqref{eq:ortho}, weighted by annealed coefficient $\beta(t) = \beta_{\max} \cdot \frac{t}{T-1}$ with $\beta_{\max} = 5.0$. This annealing schedule allows the residual pathway to freely discover predictive features initially before the geometric constraint is progressively enforced, preventing premature collapse.
+\end{itemize}
+
+The hyperparameters $\alpha = 1.0$ and $\beta_{\max} = 5.0$ balance the three objectives. Together, $\mathcal{L}_{\text{task}}$ ensures predictive accuracy, $\mathcal{L}_{\text{concept}}$ anchors $\hat{C}$ to known financial domain knowledge, and $\mathcal{L}_{\text{ortho}}$ enforces the theoretical identifiability condition of Proposition~\ref{prop:equivalence}.
 
 \section{Theoretical Analysis}
 
