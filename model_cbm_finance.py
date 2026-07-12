@@ -55,15 +55,16 @@ class OrthogonalCBMLOB(nn.Module):
 def orthogonality_loss(c_pred, res_pred):
     """
     KUNCI TEORETIS JMLR: 
-    Menghitung Cosine Similarity Penalty agar Residual tegak lurus (90 derajat) 
-    dari Konsep Manusia. Jika AI mencoba mencontek, nilai Loss ini akan meledak.
+    Menghitung Cross-Subspace Orthogonality Penalty (Frobenius Norm) agar 
+    Residual tegak lurus secara geometris dari Konsep Manusia.
+    Sesuai dengan Eq. 3 di manuscript: || C_norm^T R_norm ||_F
     """
-    # Normalisasi vektor konsep dan residual
+    # Normalisasi fitur-wise (kolom) untuk konsep dan residual
     c_norm = F.normalize(c_pred, p=2, dim=0)
     res_norm = F.normalize(res_pred, p=2, dim=0)
     
-    # Cosine similarity matrix (Seberapa sejajar/mirip mereka?)
-    sim = torch.abs(torch.matmul(c_norm.T, res_norm))
+    # Cross-correlation matrix
+    cross_corr = torch.matmul(c_norm.T, res_norm)
     
-    # Penalti adalah total kemiripan yang harus ditekan menjadi 0
-    return torch.sum(sim)
+    # Menggunakan Frobenius Norm sesuai dengan revisi Methodology di JMLR
+    return torch.linalg.matrix_norm(cross_corr, ord='fro')
